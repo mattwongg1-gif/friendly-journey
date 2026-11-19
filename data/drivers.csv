@@ -1,6 +1,9 @@
 driver_id,email,first_name,last_name,home,vehicle_cap
-DRV-001,maria.lopez@example.com,Maria,Lopez,"41.88100,-87.70600",12
-DRV-002,james.chen@example.com,James,Chen,"42.04500,-87.79000",10
-DRV-003,aisha.patel@example.com,Aisha,Patel,"41.79000,-88.15000",14
-DRV-004,tom.novak@example.com,Tom,Novak,"41.56000,-87.51000",12
-DRV-005,grace.olsen@example.com,Grace,Olsen,"42.45000,-87.92000",11
+DRV-001,maria.lopez@example.com,Maria,Lopez,"37.56000,-77.52000",12
+DRV-002,james.chen@example.com,James,Chen,"38.86000,-77.31000",10
+DRV-003,aisha.patel@example.com,Aisha,Patel,"39.00000,-77.03000",14
+DRV-004,tom.novak@example.com,Tom,Novak,"39.40000,-76.66000",12
+DRV-005,grace.olsen@example.com,Grace,Olsen,"39.77000,-75.62000",11
+DRV-006,luis.romero@example.com,Luis,Romero,"40.60000,-75.47000",12
+DRV-007,hannah.kim@example.com,Hannah,Kim,"40.52000,-74.41000",13
+DRV-008,marcus.reed@example.com,Marcus,Reed,"40.94000,-74.07000",10
