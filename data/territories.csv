@@ -1,0 +1,6 @@
+territory_id,name,driver_id,boundary
+TER-001,Chicago West Side,DRV-001,"{""type"": ""Polygon"", ""coordinates"": [[[-87.8, 41.8], [-87.66, 41.8], [-87.66, 41.95], [-87.8, 41.95], [-87.8, 41.8]]]}"
+TER-002,North Shore,DRV-002,"{""type"": ""Polygon"", ""coordinates"": [[[-87.88, 42.0], [-87.75, 42.0], [-87.75, 42.12], [-87.88, 42.12], [-87.88, 42.0]]]}"
+TER-003,Western Suburbs,DRV-003,"{""type"": ""Polygon"", ""coordinates"": [[[-88.25, 41.7], [-87.95, 41.7], [-87.95, 41.88], [-88.25, 41.88], [-88.25, 41.7]]]}"
+TER-004,Calumet (IL/IN line),DRV-004,"{""type"": ""Polygon"", ""coordinates"": [[[-87.66, 41.48], [-87.3, 41.48], [-87.3, 41.59], [-87.66, 41.59], [-87.66, 41.48]]]}"
+TER-005,Lake County (IL/WI line),DRV-005,"{""type"": ""Polygon"", ""coordinates"": [[[-88.05, 42.3], [-87.86, 42.3], [-87.86, 42.6], [-88.05, 42.6], [-88.05, 42.3]]]}"
