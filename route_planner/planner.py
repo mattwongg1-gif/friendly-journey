@@ -35,6 +35,18 @@ def week_bounds(today: date) -> Tuple[date, date]:
     return monday, monday + timedelta(days=6)
 
 
+def _as_bool(v, default: bool) -> bool:
+    """Booleans from typed columns or CSV text ("false", "No", "0", "")."""
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return default
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("", "null", "none"):
+            return default
+        return s in ("true", "t", "yes", "y", "1")
+    return bool(v)
+
+
 def available_days(
     driver_id: str,
     plan_from: date,
@@ -63,11 +75,12 @@ def available_days(
         budget = cfg.default_max_work_mins
         if d in overrides:
             rec = overrides[d]
-            flag = rec.get(cols.avail_flag)
-            works = True if flag is None or pd.isna(flag) else bool(flag)
+            works = _as_bool(rec.get(cols.avail_flag), default=True)
             mx = rec.get(cols.avail_max_mins)
+            if isinstance(mx, str):
+                mx = mx.strip() or None
             if mx is not None and not pd.isna(mx):
-                budget = int(mx)
+                budget = int(float(mx))
         if works and budget > 0:
             days.append((d, budget))
         d += timedelta(days=1)
@@ -208,8 +221,14 @@ def plan_week(
     known = set(drivers[cols.driver_pk])
     bulk_unsched(due[~due["driver_id"].isin(known)], "driver_not_found")
 
+    # Plan drivers region by region so road data loaded for one driver is
+    # reused by their neighbours.
+    def region(rec):
+        h = parse_geopoint(rec.get(cols.driver_home))
+        return (0, int(h[0] // 2), int(h[1] // 2)) if h else (1, 0, 0)
+
     attempted, failures = 0, []
-    for drv in drivers.to_dict("records"):
+    for drv in sorted(drivers.to_dict("records"), key=region):
         driver_id = drv[cols.driver_pk]
         mine = due[due["driver_id"] == driver_id]
         if mine.empty:

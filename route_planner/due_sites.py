@@ -22,6 +22,8 @@ def parse_geopoint(value) -> Optional[Tuple[float, float]]:
 
 
 def _as_date(v) -> Optional[date]:
+    if isinstance(v, str):
+        v = v.strip() or None  # CSV uploads give text; blank = no date
     if v is None or (not isinstance(v, date) and pd.isna(v)):
         return None
     if isinstance(v, pd.Timestamp):

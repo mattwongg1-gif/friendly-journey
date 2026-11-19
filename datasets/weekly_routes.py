@@ -10,6 +10,7 @@ availability table, plans the week for every driver, and writes:
 route_plan and stop_plan keep history: each run replaces only the days it
 plans (today through Sunday) and keeps every other row from earlier runs.
 """
+import json
 import os
 import shutil
 import tempfile
@@ -23,7 +24,7 @@ from pyspark.sql import types as T
 from transforms.api import Input, Output, incremental, transform
 
 from myproject.route_planner import Columns, HaversineProvider, PlannerConfig, plan_week
-from myproject.route_planner.road_graph import RoadGraphProvider, load_graph
+from myproject.route_planner.road_graph import RegionalRoadGraphs, load_graph
 from myproject.route_planner.planner import (
     ROUTE_COLUMNS, STOP_COLUMNS, TARGET_COLUMNS, UNSCHEDULED_COLUMNS, week_bounds,
 )
@@ -38,7 +39,8 @@ SITE_DS = "/YourOrg/YourProject/ontology/site"
 # Optional. None = everyone works the default days (Mon-Fri, 480 min).
 AVAILABILITY_DS = None   # e.g. f"{FOLDER}/driver_availability"
 # Optional. None = straight-line drive estimates. Set to the road graph
-# dataset built by datasets/road_graph.py for real road times and lines.
+# dataset built by datasets/road_graph.py (one file per state) for real
+# road times and lines.
 ROAD_GRAPH_DS = None     # e.g. f"{FOLDER}/road_graph"
 # -----------------------------------------------------------------------------
 
@@ -124,12 +126,18 @@ def _provider(road_graph):
     if road_graph is None:
         return fallback
     fs = road_graph.filesystem()
-    with tempfile.TemporaryDirectory() as tmp:
-        local = os.path.join(tmp, "road_graph.npz")
-        with fs.open("road_graph.npz", "rb") as src, open(local, "wb") as dst:
-            shutil.copyfileobj(src, dst, length=16 * 1024 * 1024)
-        graph = load_graph(local)
-    return RoadGraphProvider(graph, fallback=fallback)
+    with fs.open("index.json", "r") as fh:
+        index = json.load(fh)
+
+    def load_state(name):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = os.path.join(tmp, f"{name}.npz")
+            with fs.open(f"{name}.npz", "rb") as src, open(local, "wb") as dst:
+                shutil.copyfileobj(src, dst, length=16 * 1024 * 1024)
+            return load_graph(local)
+
+    # Loads only the states near each driver; joins neighbours at borders.
+    return RegionalRoadGraphs(index, load_state, fallback=fallback)
 
 
 _inputs = {"drivers": Input(DRIVER_DS), "territories": Input(TERRITORY_DS), "sites": Input(SITE_DS)}

@@ -67,6 +67,43 @@ def _haversine_m(lat1, lon1, lat2, lon2):
     return 2 * EARTH_R * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
 
 
+def _dedupe_edges(u, v, s):
+    """Drop self-loops; keep the fastest of duplicate (u, v) edges."""
+    keep = u != v
+    u, v, s = u[keep], v[keep], s[keep]
+    order = np.lexsort((s, v, u))
+    u, v, s = u[order], v[order], s[order]
+    first = np.ones(len(u), dtype=bool)
+    first[1:] = (u[1:] != u[:-1]) | (v[1:] != v[:-1])
+    return u[first], v[first], s[first]
+
+
+def merge_graphs(graphs: Sequence[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
+    """Join per-state graphs on OSM node id (border roads appear in both)."""
+    if len(graphs) == 1:
+        return graphs[0]
+    ids = np.concatenate([g["osm_id"] for g in graphs])
+    lat = np.concatenate([g["lat"] for g in graphs])
+    lon = np.concatenate([g["lon"] for g in graphs])
+    _, first, inv = np.unique(ids, return_index=True, return_inverse=True)
+    offsets = np.cumsum([0] + [len(g["osm_id"]) for g in graphs[:-1]])
+    u = np.concatenate([inv[g["u"].astype(np.int64) + o] for g, o in zip(graphs, offsets)])
+    v = np.concatenate([inv[g["v"].astype(np.int64) + o] for g, o in zip(graphs, offsets)])
+    s = np.concatenate([g["secs"] for g in graphs])
+    u, v, s = _dedupe_edges(u, v, s)
+    return {"lat": lat[first], "lon": lon[first], "osm_id": ids[first],
+            "u": u.astype(np.int32), "v": v.astype(np.int32), "secs": s.astype(np.float32)}
+
+
+CELL_DEG = 0.25  # ~28 km coverage cells used to pick which states a driver needs
+
+
+def coverage_cells(lat: np.ndarray, lon: np.ndarray) -> List[List[int]]:
+    """Grid cells (CELL_DEG square) that contain at least one road node."""
+    cells = np.unique(np.column_stack([np.floor(lat / CELL_DEG), np.floor(lon / CELL_DEG)]).astype(int), axis=0)
+    return cells.tolist()
+
+
 def build_road_graph(
     osm_paths: Iterable[str],
     speeds_kmh: Dict[str, float] = DEFAULT_SPEEDS_KMH,
@@ -75,8 +112,10 @@ def build_road_graph(
 ) -> Dict[str, np.ndarray]:
     """Read drivable roads from one or more OSM files (.pbf or .osm).
 
-    Returns arrays: lat, lon (per node) and u, v, secs (per directed edge).
-    Several files (e.g. neighbouring states) are merged on OSM node id.
+    Returns arrays: lat, lon, osm_id (per node) and u, v, secs (per directed
+    edge). Several files are merged on OSM node id. For per-state graphs that
+    will be joined later (merge_graphs), pass keep_largest_component=False so
+    roads that only connect through the neighbouring state are kept.
     """
     import osmium
 
@@ -121,7 +160,7 @@ def build_road_graph(
     lens = np.frombuffer(way_len, dtype=np.int64)
     way_of_pt = np.repeat(np.arange(len(lens)), lens)
 
-    _, inv = np.unique(ids_a, return_inverse=True)
+    uniq_ids, inv = np.unique(ids_a, return_inverse=True)
     n_nodes = int(inv.max()) + 1
     node_lat = np.empty(n_nodes)
     node_lon = np.empty(n_nodes)
@@ -143,14 +182,7 @@ def build_road_graph(
     v = np.concatenate([b[fwd], a[rev]])
     s = np.concatenate([secs[fwd], secs[rev]])
 
-    # Keep the fastest of any duplicate edges (overlapping files, double-mapped ways).
-    keep = u != v
-    u, v, s = u[keep], v[keep], s[keep]
-    order = np.lexsort((s, v, u))
-    u, v, s = u[order], v[order], s[order]
-    first = np.ones(len(u), dtype=bool)
-    first[1:] = (u[1:] != u[:-1]) | (v[1:] != v[:-1])
-    u, v, s = u[first], v[first], s[first]
+    u, v, s = _dedupe_edges(u, v, s)
 
     if keep_largest_component:
         g = csr_matrix((s, (u, v)), shape=(n_nodes, n_nodes))
@@ -160,12 +192,13 @@ def build_road_graph(
         remap[main] = np.arange(int(main.sum()))
         e = main[u] & main[v]
         u, v, s = remap[u[e]], remap[v[e]], s[e]
-        node_lat, node_lon = node_lat[main], node_lon[main]
+        node_lat, node_lon, uniq_ids = node_lat[main], node_lon[main], uniq_ids[main]
 
     log.info("road graph: %d nodes, %d edges", len(node_lat), len(u))
     return {
         "lat": node_lat.astype(np.float64),
         "lon": node_lon.astype(np.float64),
+        "osm_id": uniq_ids.astype(np.int64),
         "u": u.astype(np.int32),
         "v": v.astype(np.int32),
         "secs": s.astype(np.float32),
@@ -185,10 +218,6 @@ class _Sub:
         _, labels = connected_components(g, directed=True, connection="strong")
         self.snap_ids = np.nonzero(labels == np.bincount(labels).argmax())[0]
         self.tree = cKDTree(_xyz(lat[self.snap_ids], lon[self.snap_ids]))
-
-    def contains(self, coords):
-        la0, la1, lo0, lo1 = self.bbox
-        return all(la0 <= a <= la1 and lo0 <= b <= lo1 for a, b in coords)
 
 
 class RoadGraphProvider(TravelProvider):
@@ -218,14 +247,24 @@ class RoadGraphProvider(TravelProvider):
         self._sub: Optional[_Sub] = None
 
     # -- graph clipping ------------------------------------------------------
-    def _subgraph(self, coords: Sequence[Tuple[float, float]]) -> _Sub:
-        if self._sub is not None and self._sub.contains(coords):
-            return self._sub
+    def _bbox(self, coords):
         la = [c[0] for c in coords]
         lo = [c[1] for c in coords]
         dlat = self.buffer_km / 111.0
         dlon = self.buffer_km / (111.0 * max(0.2, np.cos(np.radians(np.mean(la)))))
-        bbox = (min(la) - dlat, max(la) + dlat, min(lo) - dlon, max(lo) + dlon)
+        return (min(la) - dlat, max(la) + dlat, min(lo) - dlon, max(lo) + dlon)
+
+    def covers(self, coords) -> bool:
+        """True if the current clipped area already includes coords + buffer."""
+        if self._sub is None:
+            return False
+        a, b = self._bbox(coords), self._sub.bbox
+        return a[0] >= b[0] and a[1] <= b[1] and a[2] >= b[2] and a[3] <= b[3]
+
+    def _subgraph(self, coords: Sequence[Tuple[float, float]]) -> _Sub:
+        if self.covers(coords):
+            return self._sub
+        bbox = self._bbox(coords)
         mask = (self.lat >= bbox[0]) & (self.lat <= bbox[1]) & (self.lon >= bbox[2]) & (self.lon <= bbox[3])
         keep = np.nonzero(mask)[0]
         if len(keep) < 2:
@@ -305,4 +344,61 @@ def save_graph(graph: Dict[str, np.ndarray], fileobj) -> None:
 
 def load_graph(fileobj) -> Dict[str, np.ndarray]:
     with np.load(fileobj) as z:
-        return {k: z[k] for k in ("lat", "lon", "u", "v", "secs")}
+        return {k: z[k] for k in z.files}
+
+
+class RegionalRoadGraphs(TravelProvider):
+    """Loads only the states each driver needs.
+
+    index: {state_name: [[lat_cell, lon_cell], ...]} from coverage_cells().
+    load:  function(state_name) -> graph dict (from load_graph).
+    For each driver, the states whose road cells fall within buffer_km of the
+    home and stores are loaded and joined; at most max_cached joined sets are
+    kept in memory, so process drivers region by region where possible.
+    """
+
+    def __init__(self, index: Dict[str, List[List[int]]], load, buffer_km: float = 25.0,
+                 max_cached: int = 2, **provider_kwargs):
+        self.cells = {name: {tuple(c) for c in cells} for name, cells in index.items()}
+        self.load = load
+        self.buffer_km = buffer_km
+        self.max_cached = max(1, max_cached)
+        self.kw = provider_kwargs
+        self._cache: Dict[Tuple[str, ...], RoadGraphProvider] = {}
+        self._last: Optional[RoadGraphProvider] = None
+
+    def states_for(self, coords) -> Tuple[str, ...]:
+        la = [c[0] for c in coords]
+        lo = [c[1] for c in coords]
+        dlat = self.buffer_km / 111.0
+        dlon = self.buffer_km / (111.0 * max(0.2, np.cos(np.radians(np.mean(la)))))
+        i0, i1 = int(np.floor((min(la) - dlat) / CELL_DEG)), int(np.floor((max(la) + dlat) / CELL_DEG))
+        j0, j1 = int(np.floor((min(lo) - dlon) / CELL_DEG)), int(np.floor((max(lo) + dlon) / CELL_DEG))
+        want = {(i, j) for i in range(i0, i1 + 1) for j in range(j0, j1 + 1)}
+        names = tuple(sorted(n for n, cells in self.cells.items() if cells & want))
+        if not names:
+            raise ValueError(
+                f"No uploaded road data near lat {np.mean(la):.3f}, lon {np.mean(lo):.3f}: "
+                "upload the .osm.pbf for that state and rebuild road_graph")
+        return names
+
+    def _provider(self, coords) -> RoadGraphProvider:
+        last = self._last
+        if last is not None and last.covers(coords):
+            return last
+        key = self.states_for(coords)
+        prov = self._cache.pop(key, None)
+        if prov is None:
+            log.info("loading road data for %s", ", ".join(key))
+            prov = RoadGraphProvider(merge_graphs([self.load(n) for n in key]), buffer_km=self.buffer_km, **self.kw)
+        self._cache[key] = prov  # most recent last
+        while len(self._cache) > self.max_cached:
+            self._cache.pop(next(iter(self._cache)))
+        self._last = prov
+        return prov
+
+    def duration_matrix_mins(self, coords):
+        return self._provider(coords).duration_matrix_mins(coords)
+
+    def line_geometry(self, coords):
+        return self._provider(coords).line_geometry(coords)
